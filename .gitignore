@@ -1,0 +1,4 @@
+bin/
+stress_report_*.json
+stress_report_*.csv
+*.test
