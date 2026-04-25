@@ -1,0 +1,93 @@
+Crea una herramienta de stress testing de red en Go con dos binarios independientes:
+`stress-server` (corre en OCI) y `stress-client` (corre en el Orange Pi 5 / onpremise),
+disenados para probar una conexion Cloudflare Mesh site-to-site.
+
+STRESS-SERVER  (target: linux/amd64 para Ubuntu Server OCI)
+
+Puertos y protocolos que debe escuchar:
+- TCP :9000  - echo server (responde exactamente los bytes recibidos)
+- UDP :9001  - echo server
+- HTTP :8080 - endpoints:
+    GET  /ping          -> responde {"status":"ok","ts":<unix_ns>}
+    POST /data          -> recibe body, responde con su tamano en bytes
+    GET  /stats         -> JSON con las estadisticas actuales del servidor
+    GET  /              -> dashboard HTML con auto-refresh cada 1 segundo
+
+Estadisticas que el servidor debe trackear (en memoria, con mutex):
+- total_connections       int64
+- active_connections      int64
+- bytes_received          int64
+- bytes_sent              int64
+- requests_per_second     float64   (calculado cada segundo)
+- errors                  int64
+- uptime_seconds          int64
+- per_protocol: {tcp, udp, http} con sus propios contadores
+
+El endpoint GET /stats debe devolver JSON con todos esos campos.
+
+El dashboard HTML en GET / debe mostrar una tabla con esas metricas actualizada cada segundo via fetch() al endpoint /stats. Sin dependencias externas, todo inline en un solo string HTML en Go.
+
+El endpoint GET /metrics debe exportar metricas en formato Prometheus (texto plano), para futura integracion opcional.
+
+Flag de inicio: --host 0.0.0.0 --port-tcp 9000 --port-udp 9001 --port-http 8080
+
+STRESS-CLIENT  (target: linux/arm64 para Orange Pi 5)
+
+Flags requeridos:
+  --host          IP del servidor en OCI (ej: 10.175.0.5)
+  --workers       numero de conexiones concurrentes (default: 50)
+  --duration      duracion total del test en segundos (default: 60)
+  --mode          tcp | udp | http | mixed (default: mixed)
+  --payload-size  tamano del payload en bytes por request (default: 1024)
+  --ramp-up       segundos para llegar al total de workers (default: 5)
+  --report-interval  intervalo de reporte en segundos (default: 2)
+
+Comportamiento:
+- Lanzar --workers goroutines de forma gradual durante --ramp-up segundos
+- Cada worker envia requests de forma continua durante --duration segundos
+- En modo "mixed": distribuir workers 40% TCP, 30% UDP, 30% HTTP
+- En modo TCP: conectar a --host:9000, enviar payload, leer echo, medir RTT
+- En modo UDP: enviar datagram a --host:9001, esperar respuesta, medir RTT
+- En modo HTTP: POST /data con body de --payload-size bytes, medir latencia
+
+Metricas que el cliente debe recolectar y mostrar:
+- Latencia: p50, p95, p99, max, min (en ms, con histograma de buckets)
+- Throughput: requests/segundo y MB/s (enviados y recibidos)
+- Errores: count total y tasa de error %
+- Conexiones: activas en este momento
+- Tiempo transcurrido y tiempo restante
+
+Output en terminal:
+- Tabla de metricas que se actualiza cada --report-interval segundos
+  (usar \r o ANSI escape codes para reescribir en lugar de hacer scroll)
+- Formato legible: columnas alineadas, valores en color si el terminal lo soporta (verde OK, amarillo warning >100ms p95, rojo error >500ms)
+
+Al finalizar:
+- Imprimir resumen completo con todas las metricas del test
+- Guardar reporte en JSON: stress_report_<timestamp>.json
+- Guardar reporte en CSV: stress_report_<timestamp>.csv
+  (una fila por intervalo de tiempo con todas las metricas)
+
+ESTRUCTURA DEL PROYECTO
+
+mesh-stress-test/
+├── cmd/
+│   ├── server/main.go
+│   └── client/main.go
+├── internal/
+│   ├── stats/     - estructuras y calculos compartidos
+│   └── proto/     - helpers TCP/UDP
+├── Makefile       - con targets: build-server, build-client, cross-server (linux/amd64), cross-client (linux/arm64)
+└── README.md      - instrucciones de uso
+
+El Makefile debe incluir:
+  make cross-server  -> GOOS=linux GOARCH=amd64 ... -o bin/stress-server-linux-amd64
+  make cross-client  -> GOOS=linux GOARCH=arm64 ... -o bin/stress-client-linux-arm64
+
+RESTRICCIONES
+
+- Solo stdlib de Go + opcionalmente github.com/schollz/progressbar si quieres una barra de progreso. Nada mas.
+- El servidor no debe requerir root ni privilegios especiales.
+- El cliente debe manejar context cancellation correctamente con senales SIGINT/SIGTERM para cerrar limpiamente y siempre guardar el reporte aunque se interrumpa.
+- Todo el codigo en Go idiomatico: errores manejados, goroutines con WaitGroup o errgroup, sin data races (usar sync/atomic o mutex).
+- Funcionar en Linux (no necesita Windows/macOS).
