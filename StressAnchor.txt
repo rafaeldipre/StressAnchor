@@ -1,93 +1,115 @@
-Crea una herramienta de stress testing de red en Go con dos binarios independientes:
-`stress-server` (corre en OCI) y `stress-client` (corre en el Orange Pi 5 / onpremise),
-disenados para probar una conexion Cloudflare Mesh site-to-site.
+Create a Go network stress testing tool with two independent binaries:
+`stress-server` runs on OCI, and `stress-client` runs on an Orange Pi 5 or another on-premise Linux host.
 
-STRESS-SERVER  (target: linux/amd64 para Ubuntu Server OCI)
+The tool is intended to validate a Cloudflare Mesh site-to-site network path.
 
-Puertos y protocolos que debe escuchar:
-- TCP :9000  - echo server (responde exactamente los bytes recibidos)
-- UDP :9001  - echo server
-- HTTP :8080 - endpoints:
-    GET  /ping          -> responde {"status":"ok","ts":<unix_ns>}
-    POST /data          -> recibe body, responde con su tamano en bytes
-    GET  /stats         -> JSON con las estadisticas actuales del servidor
-    GET  /              -> dashboard HTML con auto-refresh cada 1 segundo
+STRESS-SERVER
+Target: linux/amd64 for Ubuntu Server on OCI.
 
-Estadisticas que el servidor debe trackear (en memoria, con mutex):
-- total_connections       int64
-- active_connections      int64
-- bytes_received          int64
-- bytes_sent              int64
-- requests_per_second     float64   (calculado cada segundo)
-- errors                  int64
-- uptime_seconds          int64
-- per_protocol: {tcp, udp, http} con sus propios contadores
+Required listeners:
 
-El endpoint GET /stats debe devolver JSON con todos esos campos.
+- TCP `:9000`: echo server that returns exactly the bytes it receives.
+- UDP `:9001`: echo server.
+- HTTP `:8080` with these endpoints:
+  - `GET /ping`: returns `{"status":"ok","ts":<unix_ns>}`.
+  - `POST /data`: receives a request body and returns its size in bytes.
+  - `GET /stats`: returns the current server statistics as JSON.
+  - `GET /`: serves an HTML dashboard that refreshes every second.
+  - `GET /metrics`: exports Prometheus-compatible text metrics.
 
-El dashboard HTML en GET / debe mostrar una tabla con esas metricas actualizada cada segundo via fetch() al endpoint /stats. Sin dependencias externas, todo inline en un solo string HTML en Go.
+The server must track these in-memory statistics with a mutex:
 
-El endpoint GET /metrics debe exportar metricas en formato Prometheus (texto plano), para futura integracion opcional.
+- `total_connections`
+- `active_connections`
+- `bytes_received`
+- `bytes_sent`
+- `requests_per_second`, calculated every second
+- `errors`
+- `uptime_seconds`
+- `per_protocol` counters for TCP, UDP, and HTTP
 
-Flag de inicio: --host 0.0.0.0 --port-tcp 9000 --port-udp 9001 --port-http 8080
+The dashboard must be fully inline in Go, with no external dependencies.
 
-STRESS-CLIENT  (target: linux/arm64 para Orange Pi 5)
+Startup flags:
 
-Flags requeridos:
-  --host          IP del servidor en OCI (ej: 10.175.0.5)
-  --workers       numero de conexiones concurrentes (default: 50)
-  --duration      duracion total del test en segundos (default: 60)
-  --mode          tcp | udp | http | mixed (default: mixed)
-  --payload-size  tamano del payload en bytes por request (default: 1024)
-  --ramp-up       segundos para llegar al total de workers (default: 5)
-  --report-interval  intervalo de reporte en segundos (default: 2)
+```sh
+--host 0.0.0.0 --port-tcp 9000 --port-udp 9001 --port-http 8080
+```
 
-Comportamiento:
-- Lanzar --workers goroutines de forma gradual durante --ramp-up segundos
-- Cada worker envia requests de forma continua durante --duration segundos
-- En modo "mixed": distribuir workers 40% TCP, 30% UDP, 30% HTTP
-- En modo TCP: conectar a --host:9000, enviar payload, leer echo, medir RTT
-- En modo UDP: enviar datagram a --host:9001, esperar respuesta, medir RTT
-- En modo HTTP: POST /data con body de --payload-size bytes, medir latencia
+STRESS-CLIENT
+Target: linux/arm64 for Orange Pi 5.
 
-Metricas que el cliente debe recolectar y mostrar:
-- Latencia: p50, p95, p99, max, min (en ms, con histograma de buckets)
-- Throughput: requests/segundo y MB/s (enviados y recibidos)
-- Errores: count total y tasa de error %
-- Conexiones: activas en este momento
-- Tiempo transcurrido y tiempo restante
+Required flags:
 
-Output en terminal:
-- Tabla de metricas que se actualiza cada --report-interval segundos
-  (usar \r o ANSI escape codes para reescribir en lugar de hacer scroll)
-- Formato legible: columnas alineadas, valores en color si el terminal lo soporta (verde OK, amarillo warning >100ms p95, rojo error >500ms)
+- `--host`: server IP address in OCI, for example `10.175.0.5`
+- `--workers`: number of concurrent workers, default `50`
+- `--duration`: total test duration in seconds, default `60`
+- `--mode`: `tcp`, `udp`, `http`, or `mixed`, default `mixed`
+- `--payload-size`: payload size in bytes per request, default `1024`
+- `--ramp-up`: seconds to reach the full worker count, default `5`
+- `--report-interval`: reporting interval in seconds, default `2`
 
-Al finalizar:
-- Imprimir resumen completo con todas las metricas del test
-- Guardar reporte en JSON: stress_report_<timestamp>.json
-- Guardar reporte en CSV: stress_report_<timestamp>.csv
-  (una fila por intervalo de tiempo con todas las metricas)
+Client behavior:
 
-ESTRUCTURA DEL PROYECTO
+- Start workers gradually during the ramp-up period.
+- Each worker sends requests continuously until the test duration ends.
+- In `mixed` mode, distribute workers as 40% TCP, 30% UDP, and 30% HTTP.
+- In TCP mode, connect to `--host:9000`, send the payload, read the echo, and measure RTT.
+- In UDP mode, send a datagram to `--host:9001`, wait for the response, and measure RTT.
+- In HTTP mode, send `POST /data` with a body of `--payload-size` bytes and measure latency.
 
+Client metrics:
+
+- Latency p50, p95, p99, max, and min in milliseconds
+- Latency histogram buckets
+- Requests per second
+- Sent and received MB/s
+- Total error count and error rate
+- Active workers
+- Elapsed and remaining time
+
+Terminal output:
+
+- Update a metrics table every `--report-interval` seconds.
+- Repaint the terminal instead of scrolling.
+- Use aligned columns and ANSI colors when supported:
+  - green for OK
+  - yellow for p95 latency above 100 ms
+  - red for errors or p95 latency above 500 ms
+
+When the test finishes:
+
+- Print a complete summary.
+- Save a JSON report as `stress_report_<timestamp>.json`.
+- Save a CSV report as `stress_report_<timestamp>.csv`.
+- The CSV file should contain one row per reporting interval.
+
+Project structure:
+
+```text
 mesh-stress-test/
-├── cmd/
-│   ├── server/main.go
-│   └── client/main.go
-├── internal/
-│   ├── stats/     - estructuras y calculos compartidos
-│   └── proto/     - helpers TCP/UDP
-├── Makefile       - con targets: build-server, build-client, cross-server (linux/amd64), cross-client (linux/arm64)
-└── README.md      - instrucciones de uso
++-- cmd/
+|   +-- server/main.go
+|   +-- client/main.go
++-- internal/
+|   +-- stats/
+|   +-- proto/
++-- Makefile
++-- README.md
+```
 
-El Makefile debe incluir:
-  make cross-server  -> GOOS=linux GOARCH=amd64 ... -o bin/stress-server-linux-amd64
-  make cross-client  -> GOOS=linux GOARCH=arm64 ... -o bin/stress-client-linux-arm64
+Makefile targets:
 
-RESTRICCIONES
+- `make build-server`
+- `make build-client`
+- `make cross-server`: builds `bin/stress-server-linux-amd64`
+- `make cross-client`: builds `bin/stress-client-linux-arm64`
 
-- Solo stdlib de Go + opcionalmente github.com/schollz/progressbar si quieres una barra de progreso. Nada mas.
-- El servidor no debe requerir root ni privilegios especiales.
-- El cliente debe manejar context cancellation correctamente con senales SIGINT/SIGTERM para cerrar limpiamente y siempre guardar el reporte aunque se interrumpa.
-- Todo el codigo en Go idiomatico: errores manejados, goroutines con WaitGroup o errgroup, sin data races (usar sync/atomic o mutex).
-- Funcionar en Linux (no necesita Windows/macOS).
+Restrictions:
+
+- Use only the Go standard library.
+- The server must not require root privileges.
+- The client must handle context cancellation and `SIGINT`/`SIGTERM` cleanly.
+- The client must always save the report, even when interrupted.
+- Use idiomatic Go with handled errors, goroutines coordinated with `sync.WaitGroup`, and no data races.
+- Linux support is required; Windows and macOS support is optional.
